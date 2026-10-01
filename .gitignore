@@ -1,0 +1,17 @@
+# Local environments and generated files
+.venv/
+.venv_*/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.log
+
+# Private client data, delivery history, source PDFs and local artifacts
+data/
+exemplo/
+output/
+tmp/
+.codex/
+.agents/
