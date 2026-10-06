@@ -1,3 +1,4 @@
+# Dependências do servidor, dos parsers e do e-mail.
 from email_card import render_card
 import json
 import os
@@ -23,6 +24,7 @@ import cnj_parser
 import tcepr_parser
 import domsc_parser
 
+# Configuração, arquivos locais e controle das tarefas concorrentes.
 PORT = 8000
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "frontend"
@@ -42,6 +44,7 @@ DELIVERY_LOCK=threading.RLock()
 REVIEW_FILE=DATA_DIR / "revisao_publicacoes.json"
 REVIEW_LOCK=threading.RLock()
 
+# Revisão manual e bloqueio de publicações.
 def load_reviews():
     return json.loads(REVIEW_FILE.read_text(encoding="utf-8")) if REVIEW_FILE.exists() else {}
 
@@ -68,8 +71,10 @@ def review_publication(key,action,payload=None):
         if row["modo"]!=delivery_mode(): raise ValueError("O modo de envio mudou. Analise novamente o PDF.")
         if payload is None and not row["elegivel"]: raise ValueError("Esta publicação exige conferência individual.")
         job_id=queue_email({**(payload or row["payload"]),"_modo":row["modo"],"revisao_id":key},lambda created:record_auto_send(key,row["cliente"],row["registro"],created))
-        return {"status":"na_fila","envio_id":job_id}
+        with EMAIL_JOBS_LOCK:
+            return {**EMAIL_JOBS.get(job_id,{"status":"na_fila"}),"envio_id":job_id}
 
+# Modo de envio, histórico persistente e fila de e-mails.
 def delivery_mode():
     if not SETTINGS_FILE.exists(): return "real"
     return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))["modo"]
@@ -95,9 +100,22 @@ def run_email_job(job_id,payload):
         result["atualizado_em"]=time.time()
     except Exception as exc:
         result={"status":"erro","erro":str(exc),"atualizado_em":time.time()}
-    with EMAIL_JOBS_LOCK: EMAIL_JOBS[job_id]=result
-    update_auto_send_status(job_id,result)
     write_delivery(job_id,result)
+    update_auto_send_status(job_id,result)
+    with EMAIL_JOBS_LOCK: EMAIL_JOBS[job_id]=result
+
+
+def recover_test_jobs():
+    """Completa capturas locais interrompidas; nunca aciona SMTP/Outlook."""
+    with DELIVERY_LOCK:
+        for job_id,job in delivery_history().items():
+            if job.get('modo')!='teste' or job.get('status') not in ('na_fila','enviando'):
+                continue
+            payload=job.get('payload')
+            if not payload or not (payload.get('corpo') or payload.get('html')):
+                write_delivery(job_id,{'status':'erro','erro':'Conteúdo indisponível para recuperar a captura de teste.'})
+                continue
+            run_email_job(job_id,{**payload,'_modo':'teste'})
 
 def queue_email(payload,on_created=None):
     payload={**payload,"_modo":payload.get("_modo",delivery_mode())}
@@ -105,9 +123,14 @@ def queue_email(payload,on_created=None):
     write_delivery(job_id,{"envio_id":job_id,"modo":payload["_modo"],"status":"na_fila","criado_em":time.time(),"para":payload.get("para"),"assunto":payload.get("assunto"),"cliente":payload.get("cliente_nome",""),"payload":payload})
     with EMAIL_JOBS_LOCK: EMAIL_JOBS[job_id]={"status":"na_fila","atualizado_em":time.time()}
     if on_created: on_created(job_id)
-    EMAIL_EXECUTOR.submit(run_email_job,job_id,payload)
+    if payload['_modo']=='teste':
+        # A captura local não precisa de fila em segundo plano: persiste antes de responder.
+        run_email_job(job_id,payload)
+    else:
+        EMAIL_EXECUTOR.submit(run_email_job,job_id,payload)
     return job_id
 
+# Cadastro de monitorados e prevenção de envios duplicados.
 def load_clients():
     if not CLIENTS_FILE.exists(): return []
     try: return json.loads(CLIENTS_FILE.read_text(encoding="utf-8"))
@@ -145,6 +168,7 @@ def update_auto_send_status(job_id,result):
                 changed=True
         if changed: save_auto_sends(history)
 
+# Integração SMTP/Outlook e confirmação dos envios.
 def email_connection_status():
     if delivery_mode()=="teste": return {"email_mode":"teste","email_ready":True,"email_detail":"Caixa local de testes. Não envia ao Gmail."}
     if os.getenv("SMTP_HOST") and (os.getenv("SMTP_FROM") or os.getenv("SMTP_USER")):
@@ -299,6 +323,7 @@ def send_email(payload):
         if os.getenv("SMTP_USER"): smtp.login(os.getenv("SMTP_USER"),os.getenv("SMTP_PASSWORD",""))
         smtp.send_message(msg)
 
+# Leitura do PDF recebido pelo formulário.
 def parse_multipart(handler):
     content_type = handler.headers.get("Content-Type", "")
     length = int(handler.headers.get("Content-Length", "0"))
@@ -315,6 +340,7 @@ def parse_multipart(handler):
             return filename, part.get_payload(decode=True)
     raise ValueError("Campo PDF não encontrado.")
 
+# Normalização e pontuação das correspondências com clientes.
 def normalize(s):
     return re.sub(r"\s+", " ", s or "").strip()
 
@@ -382,6 +408,7 @@ def matching_clients(record,clients):
 def matching_client_ids(record,clients):
     return [str(match["cliente"].get("id")) for match in matching_clients(record,clients) if match["cliente"].get("id")]
 
+# Montagem do e-mail e regras de envio automático.
 def publication_email(client,record):
     subject=f"Publicação processual — {record.get('processo') or 'processo não identificado'}"
     body="\r\n".join([
@@ -422,6 +449,7 @@ def auto_send_key(client,record,mode="real"):
     raw="|".join([str(client.get("id","")),str(record.get("processo","")),str(record.get("conteudo",""))])
     return ("teste:" if mode=="teste" else "")+hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+# Extração do PDF e separação das publicações por contexto.
 def extract_pages(pdf_bytes):
     with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
         return cnj_parser.extract(doc)
@@ -613,6 +641,7 @@ def split_publications(pages):
         })
     return records
 
+# Rotas da API e entrega dos arquivos da interface.
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[HTTP] {self.address_string()} - {fmt % args}")
@@ -637,6 +666,7 @@ class Handler(BaseHTTPRequestHandler):
         path=urlparse(self.path).path
         if path=="/api/modo": return self.json_response({"modo":delivery_mode()})
         if path=="/api/historico":
+            recover_test_jobs()
             history=list(delivery_history().values())
             known={x["envio_id"] for x in history}
             history.extend({**x,"modo":"real"} for x in load_auto_sends().values() if x.get("envio_id") not in known)
@@ -823,6 +853,7 @@ class Handler(BaseHTTPRequestHandler):
             print("[ERRO]",repr(e))
             return self.json_response({"erro":str(e)},500)
 
+# Inicialização do servidor e do monitor de entregas.
 if __name__=="__main__":
     import sys
     print(f"Sistema de Clipping Jurídico v3")

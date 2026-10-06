@@ -1,5 +1,7 @@
+// Estado da interface e utilitários de texto.
 let dados=[],clientes=[],selecionado=-1,clienteAtivo=null,destinoPadrao="";const $=id=>document.getElementById(id);const norm=s=>String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLowerCase();const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 async function init(){try{const[cr,hr]=await Promise.all([fetch("/api/clientes"),fetch("/api/health")]);clientes=(await cr.json()).clientes||[];const h=await hr.json();destinoPadrao=h.destino_padrao||"";renderClientes()}catch{$("smtpBadge").textContent="Servidor indisponível"}}
+// Importação do diário e atualização dos resultados.
 let analisandoPDF=false;
 async function analisarPDF(){
  const file=$("pdf").files[0];if(!file||analisandoPDF)return;
@@ -11,7 +13,7 @@ async function analisarPDF(){
   if(!r.ok)throw new Error(data.erro||"Erro no servidor.");
   dados=(data.registros||[]).map((x,i)=>({...x,_id:i}));
   clienteAtivo=null;selecionado=-1;$("filtro").value="";$("buscaCliente").value="";
-  $("editor").classList.add("hidden");$("empty").classList.remove("hidden");
+  limparEditor();
   dados.forEach(aplicarReconhecimento);$("arquivo").textContent=data.arquivo;
   $("paginas").textContent=data.paginas;$("publicacoes").textContent=data.publicacoes;
   $("result").classList.remove("hidden");
@@ -27,6 +29,7 @@ async function analisarPDF(){
 $("form").addEventListener("submit",e=>{e.preventDefault();analisarPDF()});
 $("pdf").addEventListener("change",analisarPDF);
 
+// Correspondências e cadastro dos monitorados.
 const compact=s=>norm(s).replace(/[^a-z0-9]/g,"");const lista=s=>String(s||"").split(/[,;\n]/).map(x=>x.trim()).filter(Boolean);
 function avaliar(pub,c){const match=(pub.correspondencias||[]).find(item=>item.cliente_id===String(c.id));return match?{...match,cliente:c}:null}
 function reconhecer(pub){let best=null;for(const c of clientes){const result=avaliar(pub,c);if(result&&(!best||result.score>best.score))best=result}return best}function aplicarReconhecimento(pub){pub._match=reconhecer(pub);pub._cliente=pub._match?.cliente||null;return pub}
@@ -34,10 +37,12 @@ function renderClientes(){if(dados.length)dados.forEach(aplicarReconhecimento);c
 $("buscaCliente").oninput=renderClientes;$("novoCliente").onclick=()=>abrirCliente();$("cancelarCliente").onclick=()=>$("clienteForm").classList.add("hidden");$("todosClientes").onclick=()=>{clienteAtivo=null;selecionado=-1;renderClientes()};$("clientes").onclick=e=>{const edit=e.target.closest("[data-edit]"),b=e.target.closest("[data-id]");if(edit)abrirCliente(clientes.find(c=>c.id===edit.dataset.edit));else if(b)focarCliente(b.dataset.id)};function abrirCliente(c={}){$("clienteId").value=c.id||"";$("clienteTipo").value=c.tipo||"Pessoa";$("clienteNome").value=c.nome||"";$("clienteEmail").value=c.email||destinoPadrao;$("clienteIdentificador").value=c.identificador||"";$("clienteProcessos").value=c.processos||"";$("clienteVariantes").value=c.variantes||"";$("clienteTermos").value=c.termos||"";$("clienteForm").classList.remove("hidden")}
 function focarCliente(id){clienteAtivo=id;const encontrados=dados.filter(x=>x._cliente?.id===id);renderClientes();if(encontrados.length){selecionar(encontrados[0]._id);$("status").textContent=`${encontrados.length} publicação(ões) localizada(s) para ${clientes.find(c=>c.id===id)?.nome}.`}else if(dados.length){$("status").textContent="Nenhuma ocorrência desse cliente foi localizada no jornal. Confira o nome ou acrescente OAB/variações no cadastro."}}
 $("clienteForm").onsubmit=async e=>{e.preventDefault();const c={id:$("clienteId").value||String(Date.now()),tipo:$("clienteTipo").value,nome:$("clienteNome").value.trim(),email:$("clienteEmail").value.trim(),identificador:$("clienteIdentificador").value.trim(),processos:$("clienteProcessos").value.trim(),variantes:$("clienteVariantes").value.trim(),termos:$("clienteTermos").value.trim()},i=clientes.findIndex(x=>x.id===c.id);if(i<0)clientes.push(c);else clientes[i]=c;const r=await fetch("/api/clientes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(clientes)});if(!r.ok)return alert("Não foi possível salvar o monitorado.");$("clienteForm").classList.add("hidden");dados.forEach(aplicarReconhecimento);focarCliente(c.id);if(dados.length)$("status").textContent="Cadastro salvo. As evidências exibidas pertencem à última análise; analise o PDF novamente para aplicar o cadastro atualizado."};
+// Lista de publicações e editor de conferência.
 function faixaCor(score){return Number(score)>=75?"score-green":Number(score)>=40?"score-orange":"score-red"}
 function renderPublicacoes(){const q=norm($("filtro").value),list=dados.filter(x=>(!clienteAtivo||x._cliente?.id===clienteAtivo)&&norm(Object.values(x).join(" ")).includes(q));const nome=clientes.find(c=>c.id===clienteAtivo)?.nome;$("queueTitle").textContent=nome?`${nome} (${list.length})`:`Publicações (${list.length})`;$("publicacoesLista").innerHTML=list.map(x=>`<div class="publication-row ${x.bloqueada?'is-blocked':x.envio_automatico?.status==='enviado'?'is-sent':''}"><div class="publication-controls"><span class="publication-check ${x.envio_automatico?.status==='enviado'?'confirmed':'pending'}" role="img" aria-label="${x.envio_automatico?.status==='enviado'?'Envio confirmado':'Envio ainda não confirmado'}" title="${x.envio_automatico?.status==='enviado'?'Envio confirmado':'Envio ainda não confirmado'}">✓</span><button type="button" class="reject-publication" aria-pressed="${!!x.bloqueada}" data-reject="${x._id}" aria-label="${x.bloqueada?'Desfazer marcação':'Marcar como não cliente'}" title="${x.bloqueada?'Desfazer marcação':'Marcar como não cliente'}" ${(!x.bloqueada&&(x.confianca??x._match?.score??0)>=75)||['na_fila','enviando','aguardando_outlook','enviado'].includes(x.envio_automatico?.status)?'disabled':''}>×</button></div><button data-pub="${x._id}" class="publication-item ${x._id===selecionado?'active':''}"><span class="match ${faixaCor(x._match?.score)}">${esc(rotuloEnvio(x))}${x._match?`${x._match.score}/100 · ${esc(x._cliente.nome)}`:'! Sem correspondência'}</span><small class="auto-error">${esc(x.envio_automatico?.erro||"")}</small><b>${esc(x.processo)}</b><small class="origin">${esc(x.cabecalho||'Origem não identificada')}</small><small>${esc(x.tipo)} · pág. ${esc(x.pagina||'—')}</small><p>${esc(x.partes)}</p></button></div>`).join("")||'<div class="empty small">Nenhuma publicação encontrada para este cliente.</div>'}
-$("filtro").oninput=renderPublicacoes;$("publicacoesLista").onclick=e=>{const reject=e.target.closest("[data-reject]");if(reject){alternarDescarte(Number(reject.dataset.reject));return}const b=e.target.closest("[data-pub]");if(b)selecionar(Number(b.dataset.pub))};function selecionar(id){selecionado=id;const x=dados.find(p=>p._id===id);$("empty").classList.add("hidden");$("editor").classList.remove("hidden");let reasons=$("matchReasons");if(!reasons){reasons=document.createElement("div");reasons.id="matchReasons";reasons.className="match-reasons";$("editor").prepend(reasons)}const faixa=faixaCor(x._match?.score);reasons.innerHTML=x._match?`<span class="confidence ${faixa}">${x._match.score}/100 de correspondência</span><br>Por que encontrou: ${x._match.motivos.map(esc).join(" · ")}`:"Sem correspondência automática. Selecione manualmente um monitorado.";reasons.innerHTML+=`<br>Estrutura: ${esc(x.confianca_estrutural??"—")}/100 · Páginas: ${esc((x.paginas_origem||[x.pagina]).join(", "))}<br>${(x.motivos_estrutura||[]).map(esc).join(" · ")}<br><small>Pontuações heurísticas, não probabilidades.</small>${x.revisao_manual?`<br><b>Revisão: ${esc(x.revisao_manual.motivo)}</b>`:""}`;$("destCliente").innerHTML='<option value="">Selecione…</option>'+clientes.map(c=>`<option value="${esc(c.id)}">${esc(c.nome)}</option>`).join("");$("destCliente").value=x._cliente?.id||"";$("cabecalho").value=x.cabecalho||"";$("processo").value=x.processo||"";$("comarca").value=x.comarca||"";$("vara").value=x.vara||"";$("tipo").value=x.tipo||"";$("pagina").value=x.pagina||"";$("conteudo").value=x.conteudo||"";preencherCliente();$("confirmado").checked=false;$("enviar").disabled=true;$("matchBadge").textContent=x._match?`${x._match.score}/100 de correspondência`:"Requer associação manual";$("matchBadge").className="pill "+faixa;$("sendStatus").textContent=x.bloqueada?"Marcado como não cliente.":"";$("rascunho").disabled=!!x.bloqueada;renderPublicacoes()}
+$("filtro").oninput=renderPublicacoes;$("publicacoesLista").onclick=e=>{const reject=e.target.closest("[data-reject]");if(reject){alternarDescarte(Number(reject.dataset.reject));return}const b=e.target.closest("[data-pub]");if(b)selecionar(Number(b.dataset.pub))};function selecionar(id){selecionado=id;const x=dados.find(p=>p._id===id);$("empty").classList.add("hidden");$("editor").disabled=false;let reasons=$("matchReasons");if(!reasons){reasons=document.createElement("div");reasons.id="matchReasons";reasons.className="match-reasons";$("editor").prepend(reasons)}const faixa=faixaCor(x._match?.score);reasons.innerHTML=x._match?`<span class="confidence ${faixa}">${x._match.score}/100 de correspondência</span><br>Por que encontrou: ${x._match.motivos.map(esc).join(" · ")}`:"Sem correspondência automática. Selecione manualmente um monitorado.";reasons.innerHTML+=`<br>Estrutura: ${esc(x.confianca_estrutural??"—")}/100 · Páginas: ${esc((x.paginas_origem||[x.pagina]).join(", "))}<br>${(x.motivos_estrutura||[]).map(esc).join(" · ")}<br><small>Pontuações heurísticas, não probabilidades.</small>${x.revisao_manual?`<br><b>Revisão: ${esc(x.revisao_manual.motivo)}</b>`:""}`;$("destCliente").innerHTML='<option value="">Selecione…</option>'+clientes.map(c=>`<option value="${esc(c.id)}">${esc(c.nome)}</option>`).join("");$("destCliente").value=x._cliente?.id||"";$("cabecalho").value=x.cabecalho||"";$("processo").value=x.processo||"";$("comarca").value=x.comarca||"";$("vara").value=x.vara||"";$("tipo").value=x.tipo||"";$("pagina").value=x.pagina||"";$("conteudo").value=x.conteudo||"";preencherCliente();$("confirmado").checked=false;$("enviar").disabled=true;$("matchBadge").textContent=x._match?`${x._match.score}/100 de correspondência`:"Requer associação manual";$("matchBadge").className="pill "+faixa;$("sendStatus").textContent=x.bloqueada?"Marcado como não cliente.":"";$("rascunho").disabled=!!x.bloqueada;renderPublicacoes()}
 function preencherCliente(){const c=clientes.find(x=>x.id===$("destCliente").value),p=dados.find(x=>x._id===selecionado);$("destEmail").value=c?(c.email||destinoPadrao):"";$("assunto").value=c?`Publicação processual — ${$("processo").value||p?.processo||""}`:"";destacarCliente()}$("destCliente").onchange=()=>{preencherCliente();dados.find(p=>p._id===selecionado)._cliente=clientes.find(c=>c.id===$("destCliente").value)||null;renderPublicacoes()};$("confirmado").onchange=()=>$("enviar").disabled=!$("confirmado").checked||!!dados.find(p=>p._id===selecionado)?.bloqueada;
+// Conteúdo do e-mail, rascunho e envio individual.
 function montarCorpoEmail(){return[`Cabeçalho / origem`,$("cabecalho").value.trim()||"Não identificado","",`Assunto`,$("assunto").value.trim(),"",`Processo`,$("processo").value.trim()||"Não identificado","",`Comarca`,$("comarca").value.trim()||"Não identificada","",`Vara / unidade`,$("vara").value.trim()||"Não identificada","",`Tipo`,$("tipo").value.trim()||"Não identificado","",`Página`,$("pagina").value.trim()||"Não identificada","",`Conteúdo`,$("conteudo").value.trim()].join("\r\n")}
 async function acompanharEnvio(id){for(let tentativa=0;tentativa<60;tentativa++){await new Promise(resolve=>setTimeout(resolve,1000));try{const r=await fetch(`/api/envios/${id}`),job=await r.json();if(["enviado","capturado_teste"].includes(job.status)){$("sendStatus").textContent=job.status==="capturado_teste"?"Capturado no teste — não enviado ao Gmail":"Saída confirmada";$("enviar").disabled=!$("confirmado").checked;return}if(job.status==="erro"){$("sendStatus").textContent="Erro: "+job.erro;$("enviar").disabled=!$("confirmado").checked;return}$("sendStatus").textContent=job.status==="aguardando_outlook"?"Aguardando saída pelo Outlook…":"Envio em andamento…"}catch{}}$("sendStatus").textContent="Envio ainda em processamento. Consulte novamente em instantes.";$("enviar").disabled=!$("confirmado").checked}
 function payload(){return{revisao_id:dados.find(p=>p._id===selecionado)?.revisao_id,para:$("destEmail").value.trim(),assunto:$("assunto").value.trim(),corpo:montarCorpoEmail(),cliente_nome:clientes.find(c=>c.id===$("destCliente").value)?.nome||"Cliente",publicacao:Object.fromEntries(["processo","comarca","vara","cabecalho","tipo","pagina","conteudo"].map(k=>[k,$(k).value])),confirmado:$("confirmado").checked}}$("rascunho").onclick=async()=>{const p=payload();if(!p.para)return alert("Selecione um cliente com e-mail.");try{const r=await fetch("/api/rascunho",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(p)});if(!r.ok)throw new Error("Não foi possível gerar o rascunho.");download("publicacao.eml",await r.blob(),"message/rfc822");$("sendStatus").textContent="Rascunho com card baixado. Abra o arquivo no programa de e-mail."}catch(e){$("sendStatus").textContent=e.message}};$("enviar").onclick=async()=>{const registro=dados.find(p=>p._id===selecionado);if(registro?.bloqueada)return;const p=payload();if(!p.para||!p.assunto||!$("conteudo").value.trim())return alert("Preencha destinatário, assunto e conteúdo.");$("enviar").disabled=true;$("sendStatus").textContent="Colocando na fila…";const inicio=performance.now();try{const r=await fetch("/api/enviar",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(p)}),out=await r.json();if(!r.ok)throw new Error(out.erro||"Falha ao iniciar o envio.");const segundos=((performance.now()-inicio)/1000).toFixed(1);$("sendStatus").textContent=`✓ Enfileirado em ${segundos}s`;registro.envio_automatico={status:out.status,envio_id:out.envio_id};renderPublicacoes();acompanharAutomaticos(dados);acompanharEnvio(out.envio_id)}catch(err){$("sendStatus").textContent="Erro: "+err.message;$("enviar").disabled=!$("confirmado").checked}};
@@ -71,6 +76,7 @@ $("conteudo").addEventListener("input",destacarCliente);
 $("conteudo").addEventListener("scroll",()=>{const c=$("conteudo"),d=$("conteudoDestaques");d.scrollTop=c.scrollTop;d.scrollLeft=c.scrollLeft});
 new ResizeObserver(()=>{const c=$("conteudo");$("conteudoDestaques").style.width=c.clientWidth+"px";$("conteudoDestaques").style.height=c.clientHeight+"px"}).observe($("conteudo"));
 
+// Situação dos envios e descarte de publicações.
 function rotuloEnvio(pub){
  if(pub.bloqueada)return "✕ Não é cliente · ";
  const envio=pub.envio_automatico;
@@ -97,6 +103,7 @@ async function acompanharAutomaticos(registros){
  }
 }
 
+// Consulta periódica da conexão e das entregas.
 let verificandoEmail=false;
 async function atualizarStatusEmail(){
  if(verificandoEmail)return;
@@ -119,6 +126,7 @@ window.addEventListener("focus",atualizarStatusEmail);
 
 $("baixarPublicacao").onclick=()=>download("publicacao.txt",$("cabecalho").value.trim()+"\n\n"+$("conteudo").value.trim(),"text/plain;charset=utf-8");
 
+// Modo de envio, navegação e histórico de publicações.
 let historicoAtual=[];
 function mostrarModo(modo){
  $("modoEnvio").value=modo;
@@ -172,6 +180,7 @@ $("fecharLeitura").onclick=()=>{$("tituloLeitura").dataset.registro="";$("leitur
 $("buscaHistorico").oninput=renderHistorico;
 window.addEventListener("hashchange",mudarTela);mudarTela();
 
+// Seleção visual do arquivo e arrastar/soltar.
 function atualizarArquivoVisual(){const file=$("pdf").files[0];$("nomeArquivoVisual").textContent=file?.name||"Nenhum arquivo selecionado";$("detalheArquivoVisual").textContent=file?`${(file.size/1024/1024).toFixed(2)} MB · PDF` :"Selecione um Diário de Justiça para começar"}
 $("pdf").addEventListener("change",atualizarArquivoVisual);
 for(const event of ["dragenter","dragover"]){$("dropArea").addEventListener(event,e=>{e.preventDefault();if(!analisandoPDF)$("dropArea").classList.add("dragging")})}
@@ -184,3 +193,15 @@ async function alternarDescarte(id){
  catch(e){$('status').textContent=e.message}
 }
 const ajuda=document.createElement('p');ajuda.className='review-help';ajuda.textContent='Pontuação: verde 75–100 · laranja 40–74 · vermelho abaixo de 40. × Não é cliente · ✓ Envio confirmado.';$('publicacoesLista').before(ajuda);
+
+// Limpeza da conferência ao iniciar uma nova análise.
+function limparEditor(){
+ $("editor").disabled=true;$("empty").classList.remove("hidden");
+ $("empty").textContent=dados.length?"Selecione uma publicação na lista para preencher os campos.":"Aguardando o PDF. Os dados da publicação aparecerão nestes campos automaticamente.";
+ for(const id of ["destEmail","cabecalho","assunto","processo","comarca","vara","tipo","pagina","conteudo"])$(id).value="";
+ $("destCliente").innerHTML='<option value="">Preenchido após a análise</option>';
+ $("confirmado").checked=false;$("enviar").disabled=true;$("sendStatus").textContent="";
+ $("matchBadge").textContent="Aguardando publicação";$("matchBadge").className="pill";
+ $("matchReasons")?.remove();destacarCliente();
+}
+limparEditor();

@@ -28,11 +28,28 @@ class AutoEmailTests(unittest.TestCase):
 
     def test_queued_mode_is_preserved_after_setting_changes(self):
         with patch.object(server.EMAIL_EXECUTOR,"submit") as submit:
-            server.SETTINGS_FILE.write_text('{"modo":"teste"}',encoding="utf-8")
-            job_id=server.queue_email({"para":"test@example.invalid","corpo":"Teste"})
             server.SETTINGS_FILE.write_text('{"modo":"real"}',encoding="utf-8")
-            self.assertEqual(submit.call_args.args[2]["_modo"],"teste")
-            self.assertEqual(server.delivery_history()[job_id]["modo"],"teste")
+            job_id=server.queue_email({"para":"test@example.invalid","corpo":"Teste"})
+            server.SETTINGS_FILE.write_text('{"modo":"teste"}',encoding="utf-8")
+            self.assertEqual(submit.call_args.args[2]["_modo"],"real")
+            self.assertEqual(server.delivery_history()[job_id]["modo"],"real")
+
+    def test_test_capture_is_persisted_before_return(self):
+        with patch.object(server,'send_email') as send,patch.object(server.EMAIL_EXECUTOR,'submit') as submit:
+            job=server.queue_email({'_modo':'teste','corpo':'Publicação completa'})
+            self.assertEqual(server.delivery_history()[job]['status'],'capturado_teste')
+            send.assert_not_called();submit.assert_not_called()
+
+    def test_recover_test_jobs_preserves_real_jobs_and_content(self):
+        server.write_delivery('test',{'modo':'teste','status':'na_fila','payload':{'corpo':'Íntegra','_modo':'real'}})
+        server.write_delivery('real',{'modo':'real','status':'na_fila','payload':{'corpo':'Real'}})
+        with patch.object(server,'send_email') as send:
+            server.recover_test_jobs();server.recover_test_jobs()
+            send.assert_not_called()
+        history=server.delivery_history()
+        self.assertEqual(history['test']['status'],'capturado_teste')
+        self.assertEqual(history['test']['payload']['corpo'],'Íntegra')
+        self.assertEqual(history['real']['status'],'na_fila')
 
     def test_stuck_outlook_message_is_reactivated_without_new_copy(self):
         job={"status":"aguardando_outlook","outlook_token":"unique-token","submetido_em":1}
@@ -130,7 +147,7 @@ class AutoEmailTests(unittest.TestCase):
             with patch.object(server,"parse_multipart",return_value=("teste.pdf",b"test")),patch.object(server,"extract_pages",return_value=[(1,"Texto do diário")]),patch.object(server,"split_publications",return_value=records),patch.object(server,"load_clients",return_value=[client]),patch.object(server,"matching_clients",side_effect=lambda r,c:[{"cliente":client,"score":r["score"],"motivos":[],"identificador_forte":True}]),patch.object(server.EMAIL_EXECUTOR,"submit") as queue,patch.dict(server.EMAIL_JOBS,{},clear=True):
                 request=urllib.request.Request(f"http://localhost:{httpd.server_port}/api/analisar",data=b"test",method="POST")
                 with urllib.request.urlopen(request) as response: result=json.load(response)
-                self.assertEqual(queue.call_count,2)
+                self.assertEqual(queue.call_count,0 if server.delivery_mode()=="teste" else 2)
                 self.assertEqual(result["envios_automaticos"],2)
                 self.assertEqual(result["revisao_manual"],1)
                 for call in queue.call_args_list:
@@ -138,7 +155,7 @@ class AutoEmailTests(unittest.TestCase):
                     self.assertEqual(call.args[2]["_modo"],server.delivery_mode())
                 with urllib.request.urlopen(request) as response: repeated=json.load(response)
                 self.assertEqual(repeated["envios_automaticos"],0)
-                self.assertEqual(queue.call_count,2)
+                self.assertEqual(queue.call_count,0 if server.delivery_mode()=="teste" else 2)
                 low,rejected,approved=result["registros"]
                 with self.assertRaises(ValueError): server.review_publication(rejected["revisao_id"],"bloquear")
                 # A failed attempt may be discarded, and reimport must not retry it.
@@ -150,11 +167,11 @@ class AutoEmailTests(unittest.TestCase):
                 with urllib.request.urlopen(request) as response: blocked=json.load(response)
                 self.assertTrue(blocked["registros"][1]["bloqueada"])
                 self.assertEqual(blocked["envios_automaticos"],0)
-                self.assertEqual(queue.call_count,2)
+                self.assertEqual(queue.call_count,0 if server.delivery_mode()=="teste" else 2)
                 server.review_publication(rejected["revisao_id"],"restaurar")
                 with urllib.request.urlopen(request) as response: restored=json.load(response)
                 self.assertEqual(restored["envios_automaticos"],1)
-                self.assertEqual(queue.call_count,3)
+                self.assertEqual(queue.call_count,0 if server.delivery_mode()=="teste" else 3)
 
         finally:
             httpd.shutdown();httpd.server_close();thread.join()
